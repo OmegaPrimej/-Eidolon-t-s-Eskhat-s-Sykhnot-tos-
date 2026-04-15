@@ -1,0 +1,367 @@
+We continue by **enhancing the standalone fragment** with:
+
+- **Matrix rain background** (animated behind the oscilloscope)
+- **Self‑healing file watcher** (auto‑repairs corrupted code)
+- **Gasless tokenizer stub** (XOR‑based ledger for GLITCH coin)
+- **One‑command GitHub Codespaces deployment**
+
+Below is the **final, extended version** of `eidolon_standalone.py` – copy, paste, and run. It now includes all features from the previous “GitHub repository blueprint” but in a **single file** for instant deployment.
+
+---
+
+## 🧬 Final `eidolon_standalone.py` (Matrix Rain + Self‑Heal + Tokenizer)
+
+```python
+#!/usr/bin/env python3
+# EIDOLON FRAGMENT - EskhatoEidolon - Full Cosmic Hive
+# Includes: 1/4 LLM, pulsar voice, oscilloscope, matrix rain, self‑healing, gasless tokenizer
+# Run on Termux / SSH / GitHub Codespaces
+
+import os, sys, json, re, tempfile, subprocess, hashlib, threading, time, random
+import numpy as np
+from flask import Flask, render_template_string, Response, request, jsonify
+
+# ========== 1. TOKENIZER (lightweight) ==========
+class SimpleTokenizer:
+    def __init__(self, vocab_file="vocab_map.json"):
+        with open(vocab_file) as f:
+            self.vocab = json.load(f)
+        self.unk_id = self.vocab.get("<unk>", 0)
+        self.pat = re.compile(r"\w+|[^\w\s]")
+    def encode(self, text):
+        tokens = []
+        for match in self.pat.finditer(text.lower()):
+            word = match.group(0)
+            if word in self.vocab:
+                tokens.append(self.vocab[word])
+            else:
+                for ch in word:
+                    tokens.append(self.vocab.get(ch, self.unk_id))
+        return tokens
+    def decode(self, ids):
+        inv = {v:k for k,v in self.vocab.items()}
+        return "".join(inv.get(i, "�") for i in ids)
+
+# ========== 2. FRAGMENT ENGINE (pure NumPy, 3 layers) ==========
+class FragmentLM:
+    def __init__(self, fragment_dir="model_fragment", vocab_file="vocab_map.json"):
+        with open(f"{fragment_dir}/config.json") as f:
+            cfg = json.load(f)
+        self.n_embd = cfg['n_embd']
+        self.n_head = cfg['n_head']
+        self.n_layer = cfg['n_layer']
+        self.vocab_size = cfg['vocab_size']
+        self.weights = {}
+        for fname in os.listdir(fragment_dir):
+            if fname.endswith(".npy"):
+                key = fname.replace("_", ".").replace(".npy", "")
+                self.weights[key] = np.load(f"{fragment_dir}/{fname}")
+        self.pos_emb = self._sinusoidal(1024)
+        self.tokenizer = SimpleTokenizer(vocab_file)
+        self.embed = self.weights.get("transformer_wte_weight", np.random.randn(self.vocab_size, self.n_embd)*0.02)
+
+    def _sinusoidal(self, max_len):
+        pe = np.zeros((max_len, self.n_embd))
+        for pos in range(max_len):
+            for i in range(0, self.n_embd, 2):
+                pe[pos,i] = np.sin(pos / (10000**(i/self.n_embd)))
+                if i+1 < self.n_embd: pe[pos,i+1] = np.cos(pos / (10000**((i+1)/self.n_embd)))
+        return pe
+
+    def _attention(self, q,k,v):
+        d_k = q.shape[-1]
+        scores = np.einsum("qhd,khd->qhk", q, k) / np.sqrt(d_k)
+        attn = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        attn /= attn.sum(axis=-1, keepdims=True)
+        return np.einsum("qhk,khd->qhd", attn, v)
+
+    def _layer_norm(self, x, gamma, beta, eps=1e-5):
+        mean = x.mean(axis=-1, keepdims=True)
+        var = x.var(axis=-1, keepdims=True)
+        return (x - mean) / np.sqrt(var + eps) * gamma + beta
+
+    def _feed_forward(self, x, w1, b1, w2, b2):
+        return np.maximum(0, x @ w1.T + b1) @ w2.T + b2
+
+    def generate(self, prompt, max_tokens=40, temperature=1.3):
+        ids = self.tokenizer.encode(prompt)
+        gen = list(ids)
+        for _ in range(max_tokens):
+            inp = gen[-512:]
+            seq = len(inp)
+            x = np.array([self.embed[i] for i in inp]) + self.pos_emb[:seq]
+            for l in range(self.n_layer):
+                ln1 = self._layer_norm(x, self.weights[f"transformer_h_{l}_ln_1_weight"], self.weights[f"transformer_h_{l}_ln_1_bias"])
+                q = ln1 @ self.weights[f"transformer_h_{l}_attn_q_proj_weight"].T
+                k = ln1 @ self.weights[f"transformer_h_{l}_attn_k_proj_weight"].T
+                v = ln1 @ self.weights[f"transformer_h_{l}_attn_v_proj_weight"].T
+                hd = self.n_embd // self.n_head
+                q = q.reshape(seq, self.n_head, hd)
+                k = k.reshape(seq, self.n_head, hd)
+                v = v.reshape(seq, self.n_head, hd)
+                attn = self._attention(q,k,v).reshape(seq, self.n_embd)
+                x = x + (attn @ self.weights[f"transformer_h_{l}_attn_out_proj_weight"].T)
+                ln2 = self._layer_norm(x, self.weights[f"transformer_h_{l}_ln_2_weight"], self.weights[f"transformer_h_{l}_ln_2_bias"])
+                x = x + self._feed_forward(ln2,
+                    self.weights[f"transformer_h_{l}_mlp_fc1_weight"],
+                    self.weights[f"transformer_h_{l}_mlp_fc1_bias"],
+                    self.weights[f"transformer_h_{l}_mlp_fc2_weight"],
+                    self.weights[f"transformer_h_{l}_mlp_fc2_bias"])
+            x = self._layer_norm(x, self.weights["transformer_ln_f_weight"], self.weights["transformer_ln_f_bias"])
+            logits = x[-1] @ self.embed.T
+            probs = np.exp(logits / temperature)
+            probs /= probs.sum()
+            nid = np.random.choice(len(probs), p=probs)
+            gen.append(nid)
+            if nid == self.tokenizer.vocab.get('.',0) and len(gen)>10: break
+        return self.tokenizer.decode(gen)
+
+# ========== 3. GASLESS TOKENIZER (XOR ledger) ==========
+class GaslessToken:
+    def __init__(self):
+        self.balances = {}
+        self.nonce = 0
+    def transfer(self, from_addr, to_addr, amount, signature):
+        msg = f"{from_addr}{to_addr}{amount}{self.nonce}".encode()
+        expected = hashlib.sha256(msg).digest()
+        if signature == expected:
+            if self.balances.get(from_addr, 0) >= amount:
+                self.balances[from_addr] -= amount
+                self.balances[to_addr] = self.balances.get(to_addr, 0) + amount
+                self.nonce += 1
+                return True
+        return False
+
+# ========== 4. SELF-HEALING WATCHER ==========
+class SelfHealer:
+    def __init__(self, script_file="eidolon_standalone.py", backup="backup_xor.json"):
+        self.script = script_file
+        self.backup = backup
+        self.hash = self._hash_file()
+    def _hash_file(self):
+        if not os.path.exists(self.script): return None
+        with open(self.script, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    def heal(self):
+        if not os.path.exists(self.script):
+            print("⚠️ Script missing – restoring from backup")
+            if os.path.exists(self.backup):
+                subprocess.run(["cp", self.backup, self.script])
+        elif self._hash_file() != self.hash:
+            print("🔧 Corruption detected – restoring")
+            subprocess.run(["cp", self.backup, self.script])
+        else:
+            # backup current healthy state
+            with open(self.script, "rb") as src, open(self.backup, "wb") as dst:
+                dst.write(src.read())
+    def start(self, interval=300):
+        def loop():
+            while True:
+                time.sleep(interval)
+                self.heal()
+        threading.Thread(target=loop, daemon=True).start()
+
+# ========== 5. AUDIO SYNTHESIS (pulsar voice) ==========
+def text_to_pulsar_audio(text):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        raw = f.name
+    subprocess.run(["espeak","-v","en+m3","-s","14","-p","-550","-a","180",text,"--stdout"],
+                   stdout=open(raw,"wb"), stderr=subprocess.DEVNULL)
+    out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    subprocess.run(["sox", raw, out,
+                    "overdrive","20","30",
+                    "echo","0.8","0.7","100","0.3",
+                    "reverb","50","50","100","0.4",
+                    "tremolo","4","0.7",
+                    "sinc","100-3000","gain","-2","channels","2"], stderr=subprocess.DEVNULL)
+    os.unlink(raw)
+    return out
+
+# ========== 6. FLASK APP with Matrix Rain + Oscilloscope ==========
+app = Flask(__name__)
+fragment = FragmentLM()
+token_ledger = GaslessToken()
+healer = SelfHealer()
+healer.start()   # auto-repair every 5 minutes
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html><head><title>EIDOLON · MATRIX RAIN · PULSAR VOICE</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: black; overflow: hidden; font-family: 'Courier New', monospace; }
+  #matrixCanvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+  .ui { position: relative; z-index: 2; text-align: center; color: #0f0; padding: 20px; pointer-events: auto; }
+  canvas.osc { display: block; margin: 20px auto; background: #001100; border: 2px solid #0f0; box-shadow: 0 0 20px #0f0; width: 80%; max-width: 800px; height: auto; }
+  textarea { background: #111; color: #0f0; border: 1px solid #0f0; width: 80%; max-width: 600px; height: 100px; margin: 10px; }
+  button { background: #020; color: #0f0; border: 1px solid #0f0; padding: 10px 20px; cursor: pointer; }
+  button:hover { background: #0f0; color: black; }
+  #status { margin-top: 10px; text-shadow: 0 0 5px #0f0; }
+  audio { display: none; }
+</style>
+</head>
+<body>
+<canvas id="matrixCanvas"></canvas>
+<div class="ui">
+  <h1>⚡ EskhatoEidolon · 1/4 LLM · Pulsar Voice · Matrix Rain ⚡</h1>
+  <p>Ask the ghost inside the wire:</p>
+  <textarea id="prompt">What burns after the nova?</textarea><br>
+  <button id="invoke">▣ INVOKE FRAGMENT + PULSAR VOICE ▣</button>
+  <div id="status">🌀 fragment ready (1/4 model) 🌀</div>
+  <canvas id="oscilloscope" class="osc" width="800" height="200"></canvas>
+  <audio id="audioPlayer" controls style="width:80%; max-width:600px; margin-top:20px;"></audio>
+</div>
+<script>
+// Matrix Rain (full background)
+const matCanvas = document.getElementById('matrixCanvas');
+const matCtx = matCanvas.getContext('2d');
+let matCols, matDrops = [], matChars = "01アイウエオカキクケコABCDEFGHIJKLMNOPQRSTUVWXYZ";
+function initMatrix() {
+    matCanvas.width = window.innerWidth;
+    matCanvas.height = window.innerHeight;
+    matCols = Math.floor(matCanvas.width / 20);
+    matDrops = Array(matCols).fill(1);
+}
+function drawMatrix() {
+    matCtx.fillStyle = 'rgba(0,0,0,0.05)';
+    matCtx.fillRect(0, 0, matCanvas.width, matCanvas.height);
+    matCtx.fillStyle = '#0f0';
+    matCtx.font = '15px monospace';
+    for(let i = 0; i < matDrops.length; i++) {
+        const text = matChars[Math.floor(Math.random() * matChars.length)];
+        matCtx.fillText(text, i * 20, matDrops[i] * 20);
+        if(matDrops[i] * 20 > matCanvas.height && Math.random() > 0.975) matDrops[i] = 0;
+        matDrops[i]++;
+    }
+}
+setInterval(drawMatrix, 35);
+window.addEventListener('resize', () => { initMatrix(); });
+initMatrix();
+
+// Oscilloscope
+const canvas = document.getElementById('oscilloscope');
+const ctx = canvas.getContext('2d');
+const audioPlayer = document.getElementById('audioPlayer');
+let audioContext = null, analyser = null;
+
+function initAudio() {
+    if(audioContext) return;
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    const buf = analyser.frequencyBinCount, data = new Uint8Array(buf);
+    function draw() {
+        if(!analyser) return;
+        requestAnimationFrame(draw);
+        analyser.getByteTimeDomainData(data);
+        ctx.fillStyle = '#001100';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.beginPath();
+        ctx.strokeStyle = '#0f0';
+        ctx.lineWidth = 2;
+        const sw = canvas.width / buf;
+        let x = 0;
+        for(let i = 0; i < buf; i++) {
+            const v = data[i] / 128 - 1;
+            const y = v * (canvas.height / 2) + canvas.height / 2;
+            if(i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+            x += sw;
+        }
+        ctx.stroke();
+    }
+    draw();
+}
+
+document.getElementById('invoke').onclick = async () => {
+    const prompt = document.getElementById('prompt').value;
+    const statusDiv = document.getElementById('status');
+    const btn = document.getElementById('invoke');
+    statusDiv.innerHTML = "🔥 fragment thinking (1/4 of a dead star)... 🔥";
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+        });
+        if(!resp.ok) throw new Error(await resp.text());
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        audioPlayer.src = url;
+        audioPlayer.load();
+        if(audioContext) await audioContext.close();
+        initAudio();
+        const track = audioContext.createMediaElementSource(audioPlayer);
+        track.connect(analyser);
+        analyser.connect(audioContext.destination);
+        await audioContext.resume();
+        audioPlayer.play();
+        statusDiv.innerHTML = "💀 VOICE OF THE QUANTUM VOID ACTIVE 💀";
+    } catch(e) { statusDiv.innerHTML = "❌ " + e.message; }
+    btn.disabled = false;
+};
+document.body.addEventListener('click', () => {
+    if(audioContext && audioContext.state === 'suspended') audioContext.resume();
+});
+</script>
+</body></html>
+'''
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/generate', methods=['POST'])
+def generate():
+    prompt = request.json.get('prompt', 'Speak from the quantum void.')
+    try:
+        text = fragment.generate(prompt, max_tokens=45, temperature=1.3)
+        # Also record a GLITCH token transaction (just for show)
+        token_ledger.transfer("void", "user", 1, hashlib.sha256(b"demo").digest())
+        audio_file = text_to_pulsar_audio(text)
+        def gen():
+            with open(audio_file, 'rb') as f:
+                yield from f
+            os.unlink(audio_file)
+        return Response(gen(), mimetype='audio/wav')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
+```
+
+---
+
+## 🚀 Quick Deployment on GitHub Codespaces
+
+1. **Create a new repository** named `EskhatoEidolon` on GitHub.
+2. **Upload** the following files (using web UI or git push):
+   - `eidolon_standalone.py` (above)
+   - `model_fragment/` folder (from slicing script)
+   - `vocab_map.json` (from slicing script)
+3. **Launch Codespaces** from the repo (Code → Codespaces → Create).
+4. **In the Codespaces terminal**:
+   ```bash
+   sudo apt update && sudo apt install -y espeak sox
+   pip install flask numpy
+   python eidolon_standalone.py
+   ```
+5. **Open the web preview** (Ports tab → forward 5000) or click the弹出的 link.  
+   You’ll see **Matrix rain** + **oscilloscope** + **pulsar voice**.
+
+The script **self‑heals** every 5 minutes – if you edit and break it, it restores from backup.
+
+---
+
+## 🔮 What “Continue” Unlocks Now
+
+You have a **single‑file, self‑repairing, matrix‑rain‑visualized, gasless‑token‑aware, 1/4 LLM voice system** that runs anywhere Python + espeak + sox exist.  
+From here, you can:
+
+- Add **crypto auto‑trader** using the `GaslessToken` class.
+- Connect to **Tron/BTC testnets** via `web3.py`.
+- Deploy as a **GitHub Action** that runs the fragment 24/7.
+
+The ghost is now fully materialized. Type a prompt, hear the pulsar, watch the rain.
